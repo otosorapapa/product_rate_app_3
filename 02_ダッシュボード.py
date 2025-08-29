@@ -70,16 +70,65 @@ if search:
     mask &= df["product_name"].astype(str).str.contains(search, na=False)
 mask &= df["minutes_per_unit"].fillna(0.0).between(mpu_min, mpu_max)
 mask &= df["va_per_min"].replace([np.inf,-np.inf], np.nan).fillna(0.0).between(vapm_min, vapm_max)
-df_view = df[mask].copy()
+df_view_base = df[mask].copy()
 
-# KPI cards
+# Baseline KPI before quick adjustments
+base_ach_rate = (df_view_base["meets_required_rate"].mean()*100.0) if len(df_view_base)>0 else 0.0
+base_avg_vapm = (
+    df_view_base["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+    if "va_per_min" in df_view_base
+    else 0.0
+)
+
+# Session defaults for quick estimation toggles
+st.session_state.setdefault("quick_price", "なし")
+st.session_state.setdefault("quick_ct", "なし")
+st.session_state.setdefault("quick_material", "なし")
+
+price_adj = st.session_state.get("quick_price", "なし")
+ct_adj = st.session_state.get("quick_ct", "なし")
+mat_adj = st.session_state.get("quick_material", "なし")
+
+df_view = df_view_base.copy()
+price_map = {"+3%": 1.03, "+5%": 1.05, "+10%": 1.10}
+ct_map = {"-5%": 0.95, "-10%": 0.90}
+mat_map = {"-3%": 0.97, "-5%": 0.95}
+if price_adj in price_map:
+    df_view["actual_unit_price"] = df_view["actual_unit_price"] * price_map[price_adj]
+if ct_adj in ct_map:
+    df_view["minutes_per_unit"] = df_view["minutes_per_unit"] * ct_map[ct_adj]
+if mat_adj in mat_map:
+    df_view["material_unit_cost"] = df_view["material_unit_cost"] * mat_map[mat_adj]
+
+# Recompute dependent fields after adjustments
+df_view["gp_per_unit"] = df_view["actual_unit_price"] - df_view["material_unit_cost"]
+df_view["daily_total_minutes"] = df_view["minutes_per_unit"] * df_view["daily_qty"]
+df_view["daily_va"] = df_view["gp_per_unit"] * df_view["daily_qty"]
+with np.errstate(divide="ignore", invalid="ignore"):
+    df_view["va_per_min"] = df_view["daily_va"] / df_view["daily_total_minutes"]
+df_view = compute_results(df_view, be_rate, req_rate)
+
+ach_rate = (df_view["meets_required_rate"].mean()*100.0) if len(df_view)>0 else 0.0
+avg_vapm = (
+    df_view["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+    if "va_per_min" in df_view
+    else 0.0
+)
+
+# KPI cards with diff from baseline
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("必要賃率 (円/分)", f"{req_rate:,.3f}")
 col2.metric("損益分岐賃率 (円/分)", f"{be_rate:,.3f}")
-ach_rate = (df_view["meets_required_rate"].mean()*100.0) if len(df_view)>0 else 0.0
-col3.metric("必要賃率達成SKU比率", f"{ach_rate:,.1f}%")
-avg_vapm = df_view["va_per_min"].replace([np.inf,-np.inf], np.nan).dropna().mean() if "va_per_min" in df_view else 0.0
-col4.metric("平均 付加価値/分", f"{avg_vapm:,.1f}")
+col3.metric(
+    "必要賃率達成SKU比率",
+    f"{ach_rate:,.1f}%",
+    delta=f"{ach_rate - base_ach_rate:+.1f}%",
+)
+col4.metric(
+    "平均 付加価値/分",
+    f"{avg_vapm:,.1f}",
+    delta=f"{avg_vapm - base_avg_vapm:+.1f}",
+)
 
 # Actionable SKU Top List
 st.subheader("要対策SKUトップリスト")
@@ -135,6 +184,22 @@ tabs = st.tabs(["全体分布（散布図）", "達成状況（棒/円）", "未
 
 with tabs[0]:
     st.caption("横軸=分/個（製造リードタイム）, 縦軸=付加価値/分。色線=各シナリオの必要賃率と損益分岐賃率。")
+    qc1, qc2, qc3 = st.columns(3)
+    qc1.segmented_control("価格", ["なし", "+3%", "+5%", "+10%"], key="quick_price")
+    qc2.segmented_control("CT", ["なし", "-5%", "-10%"], key="quick_ct")
+    qc3.segmented_control("材料", ["なし", "-3%", "-5%"], key="quick_material")
+    badges = []
+    for label, key in [("価格", "quick_price"), ("CT", "quick_ct"), ("材料", "quick_material")]:
+        val = st.session_state.get(key, "なし")
+        if val != "なし":
+            badges.append(f"{label}{val}")
+    if badges:
+        st.markdown("適用中: " + " ".join([f"`{b}`" for b in badges]))
+        if st.button("元に戻す"):
+            st.session_state["quick_price"] = "なし"
+            st.session_state["quick_ct"] = "なし"
+            st.session_state["quick_material"] = "なし"
+            st.experimental_rerun()
     base = alt.Chart(df_view).mark_circle().encode(
         x=alt.X("minutes_per_unit:Q", title="分/個"),
         y=alt.Y("va_per_min:Q", title="付加価値/分", scale=alt.Scale(domain=(vapm_min, vapm_max))),
