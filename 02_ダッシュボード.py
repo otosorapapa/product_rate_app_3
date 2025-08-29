@@ -52,26 +52,66 @@ with st.expander("表示設定", expanded=False):
 
 df = compute_results(df_products_raw, be_rate, req_rate)
 
-# Global filters
-fcol1, fcol2, fcol3, fcol4 = st.columns([1,1,2,2])
+# --- Load saved filter state from URL query ---
+query = st.experimental_get_query_params()
+
+min_mpu = float(np.nan_to_num(df["minutes_per_unit"].min(), nan=0.0))
+max_mpu = float(np.nan_to_num(df["minutes_per_unit"].max(), nan=10.0))
+min_vapm = float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).min(), nan=0.0))
+max_vapm = float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).max(), nan=10.0))
+
 classes = df["rate_class"].dropna().unique().tolist()
-selected_classes = fcol1.multiselect("達成分類で絞り込み", classes, default=classes)
-search = fcol2.text_input("製品名 検索（部分一致）", "")
+default_classes = query.get("classes", [",".join(classes)])[0].split(",")
+default_classes = [c for c in default_classes if c in classes] or classes
+default_search = query.get("search", [""])[0]
+default_mpu = (
+    float(query.get("mpu_min", [min_mpu])[0]),
+    float(query.get("mpu_max", [max_mpu])[0])
+)
+default_vapm = (
+    float(query.get("vapm_min", [min_vapm])[0]),
+    float(query.get("vapm_max", [max_vapm])[0])
+)
+
+# Global filters with save/share controls
+fcol1, fcol2, fcol3, fcol4, fcol5, fcol6 = st.columns([1,1,2,2,0.7,0.7])
+selected_classes = fcol1.multiselect("達成分類で絞り込み", classes, default=default_classes)
+search = fcol2.text_input("製品名 検索（部分一致）", default_search)
 mpu_min, mpu_max = fcol3.slider(
     "分/個（製造リードタイム）の範囲",
-    float(np.nan_to_num(df["minutes_per_unit"].min(), nan=0.0)),
-    float(np.nan_to_num(df["minutes_per_unit"].max(), nan=10.0)),
-    value=(0.0, float(np.nan_to_num(df["minutes_per_unit"].max(), nan=10.0)))
+    min_mpu,
+    max_mpu,
+    value=default_mpu
 )
 vapm_min, vapm_max = fcol4.slider(
     "付加価値/分 の範囲",
-    float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).min(), nan=0.0)),
-    float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).max(), nan=10.0)),
-    value=(
-        float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).min(), nan=0.0)),
-        float(np.nan_to_num(df["va_per_min"].replace([np.inf,-np.inf], np.nan).max(), nan=10.0))
-    )
+    min_vapm,
+    max_vapm,
+    value=default_vapm
 )
+
+# Save & share buttons
+params = {
+    "classes": ",".join(selected_classes),
+    "search": search,
+    "mpu_min": f"{mpu_min}",
+    "mpu_max": f"{mpu_max}",
+    "vapm_min": f"{vapm_min}",
+    "vapm_max": f"{vapm_max}",
+}
+if fcol5.button("保存"):
+    st.experimental_set_query_params(**params)
+    st.success("ビューを保存しました")
+if fcol6.button("共有"):
+    st.experimental_set_query_params(**params)
+    try:
+        from streamlit_js_eval import streamlit_js_eval, copy_to_clipboard
+        share_url = streamlit_js_eval(js_expressions="window.location.href", want_output=True, key="share_url")
+        if share_url:
+            copy_to_clipboard(share_url)
+            st.info("URLをコピーしました")
+    except Exception:
+        st.warning("共有リンクの取得に失敗しました")
 
 mask = df["rate_class"].isin(selected_classes)
 if search:
