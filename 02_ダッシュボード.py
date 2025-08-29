@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
+import plotly.express as px
 
 from utils import compute_results
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
@@ -32,12 +33,19 @@ req_rate = base_results["required_rate"]
 for w in warn_list:
     st.warning(w)
 
-rate_lines = []
-for name, p in scenarios.items():
-    sp, _ = sanitize_params(p)
-    _, rr = compute_rates(sp)
-    rate_lines.append({"scenario": name, "type": "必要賃率", "y": rr["required_rate"]})
-    rate_lines.append({"scenario": name, "type": "損益分岐賃率", "y": rr["break_even_rate"]})
+# Color-blind friendly palette and marker shapes
+COLOR_MAP = {
+    "健康商品": "#009E73",  # bluish green
+    "貧血商品": "#E69F00",  # orange
+    "出血商品": "#D55E00",  # vermilion
+    "不明": "#0072B2",  # blue
+}
+SYMBOL_MAP = {
+    "健康商品": "circle",
+    "貧血商品": "triangle-up",
+    "出血商品": "square",
+    "不明": "diamond",
+}
 
 with st.expander("表示設定", expanded=False):
     topn = int(st.slider("未達SKUの上位件数（テーブル/パレート）", min_value=5, max_value=50, value=20, step=1))
@@ -107,6 +115,7 @@ df_view["daily_va"] = df_view["gp_per_unit"] * df_view["daily_qty"]
 with np.errstate(divide="ignore", invalid="ignore"):
     df_view["va_per_min"] = df_view["daily_va"] / df_view["daily_total_minutes"]
 df_view = compute_results(df_view, be_rate, req_rate)
+df_view["margin_to_required"] = (req_rate - df_view["va_per_min"]).clip(lower=0)
 
 ach_rate = (df_view["meets_required_rate"].mean()*100.0) if len(df_view)>0 else 0.0
 avg_vapm = (
@@ -183,7 +192,7 @@ else:
 tabs = st.tabs(["全体分布（散布図）", "達成状況（棒/円）", "未達SKU（パレート）", "SKUテーブル", "付加価値/分分布"])
 
 with tabs[0]:
-    st.caption("横軸=分/個（製造リードタイム）, 縦軸=付加価値/分。色線=各シナリオの必要賃率と損益分岐賃率。")
+    st.caption("横軸=分/個（製造リードタイム）, 縦軸=付加価値/分。必要賃率±5%帯と損益分岐賃率帯を表示。")
     qc1, qc2, qc3 = st.columns(3)
     qc1.segmented_control("価格", ["なし", "+3%", "+5%", "+10%"], key="quick_price")
     qc2.segmented_control("CT", ["なし", "-5%", "-10%"], key="quick_ct")
@@ -200,17 +209,51 @@ with tabs[0]:
             st.session_state["quick_ct"] = "なし"
             st.session_state["quick_material"] = "なし"
             st.experimental_rerun()
-    base = alt.Chart(df_view).mark_circle().encode(
-        x=alt.X("minutes_per_unit:Q", title="分/個"),
-        y=alt.Y("va_per_min:Q", title="付加価値/分", scale=alt.Scale(domain=(vapm_min, vapm_max))),
-        tooltip=["product_name:N","minutes_per_unit:Q","va_per_min:Q","rate_class:N"]
-    ).properties(height=420)
-    color = base.encode(color=alt.Color("rate_class:N", legend=alt.Legend(title="分類")))
-    rule_chart = alt.Chart(pd.DataFrame(rate_lines)).mark_rule().encode(
-        y="y:Q", color="scenario:N", strokeDash="type:N"
+
+    fig = px.scatter(
+        df_view,
+        x="minutes_per_unit",
+        y="va_per_min",
+        color="rate_class",
+        symbol="rate_class",
+        color_discrete_map=COLOR_MAP,
+        symbol_map=SYMBOL_MAP,
+        labels={
+            "minutes_per_unit": "分/個",
+            "va_per_min": "付加価値/分",
+            "rate_class": "分類",
+            "margin_to_required": "到達マージン(円/分)",
+        },
+        hover_data={
+            "product_name": True,
+            "minutes_per_unit": ":.2f",
+            "va_per_min": ":.2f",
+            "rate_class": True,
+            "margin_to_required": ":.2f",
+        },
     )
-    layered = (color + rule_chart).resolve_scale(color="independent")
-    st.altair_chart(layered, use_container_width=True)
+    fig.update_traces(marker=dict(size=10))
+    fig.update_yaxes(range=[vapm_min, vapm_max])
+    fig.update_layout(height=420, legend_title_text="分類")
+    fig.add_hrect(
+        y0=req_rate * 0.95,
+        y1=req_rate * 1.05,
+        line_width=0,
+        fillcolor="rgba(0,158,115,0.2)",
+        annotation_text="必要賃率±5%",
+        annotation_position="top left",
+    )
+    fig.add_hrect(
+        y0=be_rate * 0.95,
+        y1=be_rate * 1.05,
+        line_width=1,
+        line_color="black",
+        line_dash="dash",
+        fillcolor="rgba(0,0,0,0)",
+        annotation_text="損益分岐賃率±5%",
+        annotation_position="bottom left",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 with tabs[1]:
     c1, c2 = st.columns([1.2,1])
